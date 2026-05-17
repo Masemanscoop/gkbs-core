@@ -105,7 +105,7 @@ final class Calculator
         $features        = $t['detail_features'] ?? $t['features'] ?? [];
         $groupName       = (string) ($t['group_name'] ?? '');
 
-        $rabattPct       = (int) ($t['rabatt_prozent'] ?? 0);
+        $rabattPct       = (float) ($t['rabatt_prozent'] ?? 0);
         $startguthaben   = (float) ($t['startguthaben'] ?? -1);
         $gratisMonate    = (int) ($t['gratis_monate'] ?? -1);
         $laufzeitMonate  = (int) ($t['laufzeit_monate'] ?? 0);
