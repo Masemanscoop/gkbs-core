@@ -46,7 +46,7 @@ final class AuditLoggerTest extends TestCase
     {
         $this->logger
             ->expects(self::once())
-            ->method('info')
+            ->method('debug')
             ->with('audit.recorded', self::callback(static fn (array $ctx) =>
                 $ctx['entity_type'] === 'tariff' &&
                 $ctx['entity_id'] === '42' &&

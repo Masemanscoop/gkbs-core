@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Module-Loader with ServiceProvider pattern
 - Compliance-Gate-Runner skeleton
 
+### Changed
+- `AuditLogger::record()` emits the mirror log line at `debug` instead of `info`. Audit-Trail in `wp_mbs_audit_log` is unaffected — the change only stops the DB-LogHandler (default threshold `info`) from duplicating each audit entry into `wp_mbs_logs`. Reduces noise during bulk operations like `tariff:sync` by ~80%.
+
 ## [0.1.0-alpha.0] - 2026-05-06
 
 - Initial alpha release

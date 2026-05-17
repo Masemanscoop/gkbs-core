@@ -66,7 +66,7 @@ final class AuditLogger implements RecordsAudit
             return;
         }
 
-        $this->logger?->info('audit.recorded', [
+        $this->logger?->debug('audit.recorded', [
             'entity_type' => $entityType,
             'entity_id'   => $entityId,
             'action'      => $action,
