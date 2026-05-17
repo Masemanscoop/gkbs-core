@@ -106,9 +106,10 @@ final class AuditLogger implements RecordsAudit
 
     private function encode(array $payload): string
     {
+        $flags = JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES;
         $encoded = function_exists('wp_json_encode')
-            ? wp_json_encode($payload)
-            : json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            ? wp_json_encode($payload, $flags)
+            : json_encode($payload, $flags);
 
         return $encoded === false ? '{}' : $encoded;
     }
