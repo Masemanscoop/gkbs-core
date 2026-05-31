@@ -360,4 +360,154 @@ final class CalculatorTest extends TestCase
         $tarif = ['tarif' => 'Unbekannt'];
         self::assertSame(0.0, Calculator::calcProvision($tarif, 5, 'fixed', []));
     }
+
+    public function test_rechnungsbetrag_is_cent_accurate_per_sim(): void
+    {
+        // Listenpreis 29,99 EUR, 10% Rabatt → 26,991 EUR roh.
+        // Muss auf 26,99 EUR (abrechenbarer Cent-Betrag) gerundet werden.
+        // Sonst zeigt das Angebot pro SIM 26,99, aber gesamt 5 × = 134,955 → 134,96
+        // statt 5 × 26,99 = 134,95 (Ein-Cent-Drift im rechtsverbindlichen Dokument).
+        $quote = [
+            'tarife' => [
+                [
+                    'tarif'             => 'Drift-Tarif',
+                    'sims'              => 5,
+                    'preis_num'         => 26.99,
+                    'preis_regular_num' => 29.99,
+                    'rabatt_prozent'    => 10,
+                    'gratis_monate'     => 0,
+                    'laufzeit_monate'   => 24,
+                    'laufzeit_max'      => 24,
+                ],
+            ],
+        ];
+
+        $result = Calculator::compute($quote);
+        $calc   = $result['tarife'][0];
+
+        // Monatlicher Rechnungsbetrag pro SIM ist cent-genau gerundet.
+        self::assertSame(26.99, $calc['nach_rabatt']);
+        self::assertSame(26.99, $calc['rechnungsbetrag_sim']);
+        // Rabatt aus gerundetem Rechnungsbetrag: 29,99 - 26,99 = 3,00.
+        self::assertSame(3.0, $calc['rabatt_betrag']);
+        // Gesamt-Rechnungsbetrag = exakt 5 × Pro-SIM-Betrag (keine Drift).
+        self::assertSame(134.95, $calc['rechnungsbetrag']);
+        self::assertSame($calc['rechnungsbetrag_sim'] * 5, $calc['rechnungsbetrag']);
+        // Rechenweg geht cent-genau auf: Listenpreis - Rabatt = Rechnungsbetrag.
+        self::assertSame(
+            $calc['grundpreis'] - $calc['rabatt_betrag'],
+            $calc['nach_rabatt']
+        );
+    }
+
+    public function test_aggregates_have_no_fractional_cents(): void
+    {
+        // Zehn Tarife à 0,99 EUR: rohe Float-Akkumulation ergibt 9,8999999…,
+        // nicht 9,90. Die Summen muessen auf Cents festgeklopft sein.
+        $tarife = [];
+        for ($i = 0; $i < 10; $i++) {
+            $tarife[] = [
+                'tarif'             => 'Cent-Tarif ' . $i,
+                'sims'              => 1,
+                'preis_num'         => 0.99,
+                'preis_regular_num' => 0.99,
+                'rabatt_prozent'    => 0,
+                'rabatt_num'        => 0,
+                'laufzeit_monate'   => 24,
+                'laufzeit_max'      => 24,
+            ];
+        }
+
+        $result = Calculator::compute(['tarife' => $tarife]);
+
+        // 10 × 0,99 = 9,90 — exakt, keine Float-Schweife.
+        self::assertSame(9.9, $result['gesamt_monatlich']);
+        self::assertSame(9.9, $result['gesamt_listenpreis']);
+        self::assertSame(0.0, $result['ersparnis_monatlich']);
+        self::assertSame(0.0, $result['ersparnis_jahr']);
+
+        // Jeder monetaere Endwert hat hoechstens zwei Nachkommastellen.
+        foreach (['gesamt_monatlich', 'gesamt_listenpreis', 'ersparnis_monatlich', 'ersparnis_jahr'] as $key) {
+            self::assertSame(
+                round($result[$key], 2),
+                $result[$key],
+                $key . ' hat Bruchteile von Cents'
+            );
+        }
+    }
+
+    /**
+     * Regression: Die Laufzeit-Hochrechnung (listenpreis_laufzeit / ersparnis_laufzeit)
+     * muss die tatsaechliche Laufzeit (nutzmonate) verwenden, nicht pauschal 24.
+     *
+     * Szenario glatt gewaehlt: Listenpreis 30 EUR, 2 SIMs, Laufzeit 24-36
+     * (zahlmonate 24, nutzmonate 36). Mit dem alten hardcodierten *24 waeren es
+     * 30*2*24 = 1440 statt 30*2*36 = 2160 — der Test faellt also bei Rueckfall.
+     */
+    public function test_laufzeit_hochrechnung_uses_nutzmonate_not_hardcoded_24(): void
+    {
+        $quote = [
+            'tarife' => [
+                [
+                    'tarif'             => 'Lange Laufzeit',
+                    'sims'              => 2,
+                    'preis_num'         => 20.0,
+                    'preis_regular_num' => 30.0,
+                    'laufzeit'          => '24-36',
+                ],
+            ],
+        ];
+
+        $result = Calculator::compute($quote);
+        $calc   = $result['tarife'][0];
+
+        self::assertSame(36, $calc['nutzmonate'], 'Laufzeit-Spanne 24-36 muss nutzmonate=36 ergeben.');
+
+        // Kern-Beweis: Listenpreis-Hochrechnung skaliert mit 36 Monaten (30*2*36).
+        self::assertSame(2160.0, $calc['listenpreis_laufzeit']);
+        // Gesamtkosten ueber die Laufzeit: gesamtkosten 720 EUR * 2 SIMs.
+        self::assertSame(1440.0, $calc['gesamt_laufzeit']);
+        // Ersparnis = Listenpreis-Laufzeit minus echte Gesamtkosten (2160 - 1440).
+        self::assertSame(720.0, $calc['ersparnis_laufzeit']);
+
+        // Konsistenz-Identitaet: effektivpreis * sims * nutzmonate == gesamt_laufzeit.
+        self::assertSame(
+            $calc['gesamt_laufzeit'],
+            round($calc['effektivpreis'] * $calc['sims'] * $calc['nutzmonate'], 2),
+            'effektivpreis * nutzmonate muss die echten Gesamtkosten ergeben.'
+        );
+    }
+
+    /**
+     * Regression: Auch die Gesamt-Hochrechnung in computeCombined() (listenpreis_total /
+     * ersparnis_total) muss die gemeinsame Laufzeit nutzen, nicht 24.
+     */
+    public function test_combined_laufzeit_hochrechnung_uses_nutzmonate_not_hardcoded_24(): void
+    {
+        $tarif = [
+            'tarif'             => 'Lange Laufzeit',
+            'sims'              => 2,
+            'preis_num'         => 20.0,
+            'preis_regular_num' => 30.0,
+            'laufzeit'          => '24-36',
+        ];
+
+        $result   = Calculator::compute(['tarife' => [$tarif, $tarif]]);
+        $combined = $result['combined'];
+
+        self::assertNotNull($combined, 'Gleiche Laufzeit muss combined erzeugen.');
+        self::assertSame(36, $combined['nutzmonate']);
+
+        // Direkter Beweis: 2x (30 EUR * 2 SIMs) = 120 Grundpreise, * 36 Monate = 4320.
+        self::assertSame(120.0, $combined['total_grundpreise']);
+        self::assertSame(4320.0, $combined['listenpreis_total']);
+
+        // Identitaet aus den zurueckgegebenen Werten: ersparnis_total nutzt dieselbe
+        // Laufzeit wie listenpreis_total (gegen ein erneutes Auseinanderlaufen).
+        self::assertSame(
+            $combined['ersparnis_total'],
+            round($combined['listenpreis_total'] - ($combined['effektiv_gesamt'] * $combined['nutzmonate']), 2),
+            'ersparnis_total muss auf nutzmonate basieren, nicht auf 24.'
+        );
+    }
 }

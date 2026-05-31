@@ -19,6 +19,13 @@ namespace GKBS\Core\Pricing;
 final class Calculator
 {
     /**
+     * Standard-Vertragslaufzeit in Monaten. Dient als Default/Fallback, wenn ein
+     * Tarif keine eigene Laufzeit liefert. Die Laufzeit-Hochrechnung selbst nutzt
+     * die pro Tarif ausgelesene Laufzeit ($nutzmonate), nicht diese Konstante.
+     */
+    private const CONTRACT_TERM_MONTHS = 24;
+
+    /**
      * Berechne alle Werte fuer ein Angebot.
      *
      * @param array{tarife?: list<array<string,mixed>>} $quote Quote-Daten mit 'tarife' Array
@@ -76,8 +83,15 @@ final class Calculator
             }
         }
 
-        $result['ersparnis_monatlich'] = $result['gesamt_listenpreis'] - $result['gesamt_monatlich'];
-        $result['ersparnis_jahr']      = $result['ersparnis_monatlich'] * 24; // 24 Monate (2 Jahre)
+        // Float-Summen auf Cents festklopfen, bevor daraus die Ersparnis abgeleitet
+        // wird — sonst kann binaere Float-Akkumulation um Bruchteile von Cents driften.
+        $result['gesamt_monatlich']    = round($result['gesamt_monatlich'], 2);
+        $result['gesamt_listenpreis']  = round($result['gesamt_listenpreis'], 2);
+        $result['ersparnis_monatlich'] = round($result['gesamt_listenpreis'] - $result['gesamt_monatlich'], 2);
+        // Aggregat ueber alle Tarife (ggf. gemischte Laufzeiten) -> Vertragslaufzeit-
+        // Konstante statt einer einzelnen Tarif-Laufzeit. Feldname "jahr" ist historisch,
+        // der Wert bezieht sich auf CONTRACT_TERM_MONTHS.
+        $result['ersparnis_jahr']      = round($result['ersparnis_monatlich'] * self::CONTRACT_TERM_MONTHS, 2);
 
         if ($result['gleiche_laufzeit'] && $firstNutzmonate !== null && $firstNutzmonate > 0) {
             $result['combined'] = self::computeCombined($result['tarife'], $firstNutzmonate);
@@ -116,14 +130,14 @@ final class Calculator
             $nutzmonate   = $laufzeitMax;
             $gratismonate = $gratisMonate >= 0 ? $gratisMonate : max(0, $nutzmonate - $zahlmonate);
         } else {
-            $laufzeitStr = (string) ($t['laufzeit'] ?? '24');
+            $laufzeitStr = (string) ($t['laufzeit'] ?? (string) self::CONTRACT_TERM_MONTHS);
             if (preg_match('/(\d+)-(\d+)/', $laufzeitStr, $lzParts) === 1) {
                 $zahlmonate   = (int) $lzParts[1];
                 $nutzmonate   = (int) $lzParts[2];
                 $gratismonate = $nutzmonate - $zahlmonate;
             } else {
                 preg_match('/(\d+)/', $laufzeitStr, $lzSingle);
-                $zahlmonate   = (int) ($lzSingle[1] ?? 24);
+                $zahlmonate   = (int) ($lzSingle[1] ?? self::CONTRACT_TERM_MONTHS);
                 $nutzmonate   = $zahlmonate;
                 $gratismonate = 0;
             }
@@ -132,23 +146,28 @@ final class Calculator
             $gratismonate = 0;
         }
         if ($nutzmonate <= 0) {
-            $nutzmonate = 24;
+            $nutzmonate = self::CONTRACT_TERM_MONTHS;
         }
 
         $hasNewFields = $rabattPct > 0;
         if ($hasNewFields) {
-            $nachRabatt    = $grundpreis * (1 - $rabattPct / 100);
+            // Monatlicher Rechnungsbetrag pro SIM = real abgerechneter Cent-Betrag.
+            // Sofort auf Cents runden, sonst driftet Rechnungsbetrag-gesamt (× SIMs)
+            // um bis zu einen Cent gegen den angezeigten Pro-SIM-Preis.
+            $nachRabatt    = round($grundpreis * (1 - $rabattPct / 100), 2);
             $startguthaben = $startguthaben >= 0 ? $startguthaben : 0.0;
         } else {
             $rabattPct     = $rabattEffektiv;
-            $nachRabatt    = $grundpreis > 0 ? $grundpreis * (1 - $rabattPct / 100) : $effektivpreis;
+            $nachRabatt    = $grundpreis > 0 ? round($grundpreis * (1 - $rabattPct / 100), 2) : $effektivpreis;
             $totalFb       = $nachRabatt * $zahlmonate;
             $startguthaben = max(0.0, $totalFb - ($effektivpreis * $nutzmonate));
         }
 
-        $rabattBetrag    = $grundpreis * ($rabattPct / 100);
+        // Rabattbetrag aus dem gerundeten Rechnungsbetrag ableiten, damit im
+        // Rechenweg Listenpreis - Rabatt = Rechnungsbetrag cent-genau aufgeht.
+        $rabattBetrag    = round($grundpreis - $nachRabatt, 2);
         $totalZahlung    = $nachRabatt * $zahlmonate;
-        $totalNachSg     = $totalZahlung - $startguthaben;
+        $totalNachSg     = round($totalZahlung - $startguthaben, 2);
         $gesamtkostenRoh = $totalNachSg;
 
         $effektivBerechnet = $nutzmonate > 0 ? round($gesamtkostenRoh / $nutzmonate, 2) : 0.0;
@@ -172,13 +191,16 @@ final class Calculator
             ? $effektivpreis
             : $effektivBerechnet;
 
-        $gesamtMonatlichRoh  = $effektivFinal * $sims;
-        $gesamtLaufzeitRoh   = $gesamtkostenRoh * $sims;
-        $listenpreisLaufzeit = $grundpreis * $sims * 24;
-        $ersparnisLaufzeit   = $listenpreisLaufzeit - ($effektivFinal * $sims * 24);
+        $gesamtMonatlichRoh  = round($effektivFinal * $sims, 2);
+        $gesamtLaufzeitRoh   = round($gesamtkostenRoh * $sims, 2);
+        // Hochrechnung auf die tatsaechliche Laufzeit ($nutzmonate), NICHT pauschal 24:
+        // effektivFinal = gesamtkosten / nutzmonate, daher ergibt effektivFinal * nutzmonate
+        // exakt die echten Gesamtkosten (gesamt_laufzeit). Bei 24-Monats-Tarifen identisch.
+        $listenpreisLaufzeit = round($grundpreis * $sims * $nutzmonate, 2);
+        $ersparnisLaufzeit   = round($listenpreisLaufzeit - ($effektivFinal * $sims * $nutzmonate), 2);
 
         $rechnungsbetragSim    = $nachRabatt;
-        $rechnungsbetragGesamt = $nachRabatt * $sims;
+        $rechnungsbetragGesamt = round($nachRabatt * $sims, 2);
 
         $rechenweg = [
             ['label' => 'Listenpreis',                              'wert' => $grundpreis],
@@ -257,13 +279,23 @@ final class Calculator
             $gratismonate        = $t['gratismonate'];
         }
 
-        $totalNachSg     = $totalZahlung - $totalStartguthaben;
+        // Float-Summen auf Cents festklopfen, damit Rechenweg, Gesamtkosten und
+        // Ersparnis cent-genau aufeinander aufbauen (keine binaere Akkumulations-Drift).
+        $totalGrundpreise   = round($totalGrundpreise, 2);
+        $totalNachRabatt    = round($totalNachRabatt, 2);
+        $totalStartguthaben = round($totalStartguthaben, 2);
+        $totalZahlung       = round($totalZahlung, 2);
+
+        $totalNachSg     = round($totalZahlung - $totalStartguthaben, 2);
         $effektivGesamt  = $nutzmonate > 0 ? round($totalNachSg / $nutzmonate, 2) : 0.0;
         $effektivProSim  = ($totalSims > 0 && $nutzmonate > 0)
             ? round($totalNachSg / $nutzmonate / $totalSims, 2)
             : 0.0;
-        $listenpreisTotal = $totalGrundpreise * 24;
-        $ersparnisTotal   = $listenpreisTotal - ($effektivGesamt * 24);
+        // Auf die tatsaechliche Laufzeit ($nutzmonate, hier der Methoden-Parameter) statt
+        // pauschal 24: effektivGesamt = totalNachSg / nutzmonate, damit effektivGesamt *
+        // nutzmonate die echten Gesamt-Zahlungen ergibt.
+        $listenpreisTotal = round($totalGrundpreise * $nutzmonate, 2);
+        $ersparnisTotal   = round($listenpreisTotal - ($effektivGesamt * $nutzmonate), 2);
 
         $rechenweg = [];
         foreach ($tarife as $t) {
